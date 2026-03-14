@@ -178,9 +178,22 @@ export function ProductInputStep() {
       }
 
       if (data.imageUrls?.length) {
+        // Store the raw URLs for the text field
         updatedInput.imageUrls = data.imageUrls;
         filled.add("imageUrls");
         setImageUrlText(data.imageUrls.join("\n"));
+
+        // Also convert to InputImage objects so they show immediately in the visual grid.
+        // Any previously auto-detected images (source:"url") are replaced; uploads are kept.
+        const userUploads = input.images.filter((img) => img.source === "upload");
+        const detectedImages: InputImage[] = data.imageUrls.map((url, i) => ({
+          id: `detected-${Date.now()}-${i}`,
+          name: `Detected image ${i + 1}`,
+          url,
+          source: "url" as const,
+        }));
+        updatedInput.images = [...userUploads, ...detectedImages];
+        filled.add("images");
       }
 
       setInput(updatedInput);
@@ -340,6 +353,44 @@ export function ProductInputStep() {
               placeholder="Describe material, usage context, size, and value proposition."
             />
           </div>
+
+          {/* ── Detected images ── */}
+          {input.images.some((img) => img.source === "url") && (
+            <div className="space-y-3 md:col-span-2">
+              <div className="flex items-center gap-2">
+                <label className="text-sm font-medium">Detected Images from Amazon</label>
+                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+                  <Sparkles className="h-2.5 w-2.5" /> Auto-detected
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-3 md:grid-cols-5">
+                {input.images
+                  .filter((img) => img.source === "url")
+                  .map((img) => (
+                    <div key={img.id} className="group relative">
+                      <img
+                        src={img.url}
+                        alt={img.name}
+                        className="aspect-square w-full rounded-xl border border-emerald-200 object-cover dark:border-emerald-800"
+                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateField(
+                            "images",
+                            input.images.filter((i) => i.id !== img.id),
+                          )
+                        }
+                        className="absolute right-1 top-1 hidden rounded-full bg-zinc-900/70 p-0.5 text-white group-hover:flex"
+                        aria-label="Remove detected image"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ))}
+              </div>
+            </div>
+          )}
 
           <div className="space-y-2 md:col-span-2">
             <label className="text-sm font-medium">Existing Image Upload (Multiple)</label>
