@@ -1,15 +1,27 @@
 "use client";
 
-import { useMemo, useState } from "react";
-import { ImagePlus, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
+import {
+  AlertCircle,
+  CheckCircle2,
+  ImagePlus,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import { PRODUCT_CATEGORIES, TITLE_STYLES } from "@/constants/options";
+import { extractAsin, isAmazonUrl } from "@/lib/asin";
 import { usePdpStore } from "@/hooks/use-pdp-store";
-import { InputImage } from "@/types/pdp";
+import { InputImage, ProductInput } from "@/types/pdp";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+
+// ─── helpers ──────────────────────────────────────────────────────────────────
 
 function toInputImage(file: File): InputImage {
   return {
@@ -28,35 +40,209 @@ function parseImageUrlList(value: string) {
     .filter((url) => /^https?:\/\//.test(url));
 }
 
+type FetchStatus = "idle" | "loading" | "success" | "error";
+
+type AutoFilledFields = Set<keyof ProductInput>;
+
+// ─── auto-fill banner ─────────────────────────────────────────────────────────
+
+function AutoFillBanner({
+  status,
+  message,
+  filledCount,
+}: {
+  status: FetchStatus;
+  message: string;
+  filledCount: number;
+}) {
+  if (status === "idle") return null;
+
+  if (status === "loading") {
+    return (
+      <div className="flex items-center gap-3 rounded-xl border border-cyan-200 bg-cyan-50 px-4 py-3 text-sm text-cyan-800 dark:border-cyan-900 dark:bg-cyan-950/40 dark:text-cyan-200">
+        <Loader2 className="h-4 w-4 animate-spin" />
+        Detecting product information from URL…
+      </div>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <div className="flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
+        <AlertCircle className="h-4 w-4 shrink-0" />
+        {message}
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200">
+      <CheckCircle2 className="h-4 w-4 shrink-0" />
+      <span>
+        <strong>{filledCount} fields auto-filled</strong> — {message}. You can edit any value below.
+      </span>
+    </div>
+  );
+}
+
+// ─── labelled field with auto-fill badge ──────────────────────────────────────
+
+function FieldLabel({
+  label,
+  autoFilled,
+}: {
+  label: string;
+  autoFilled: boolean;
+}) {
+  return (
+    <div className="flex items-center gap-2">
+      <label className="text-sm font-medium">{label}</label>
+      {autoFilled && (
+        <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[10px] font-semibold text-emerald-700 dark:border-emerald-800 dark:bg-emerald-950 dark:text-emerald-300">
+          <Sparkles className="h-2.5 w-2.5" /> Auto-filled
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ─── component ───────────────────────────────────────────────────────────────
+
 export function ProductInputStep() {
-  const { input, updateField, resetToDemo } = usePdpStore();
+  const { input, updateField, setInput, resetToDemo } = usePdpStore();
   const [imageUrlText, setImageUrlText] = useState(input.imageUrls.join("\n"));
+  const [fetchStatus, setFetchStatus] = useState<FetchStatus>("idle");
+  const [fetchMessage, setFetchMessage] = useState("");
+  const [autoFilledFields, setAutoFilledFields] = useState<AutoFilledFields>(new Set());
+  // keep the last URL that was auto-fetched to debounce duplicate calls
+  const lastFetchedUrl = useRef<string>("");
 
   const allImagesPreview = useMemo(
     () => [...input.images.map((image) => image.url), ...input.imageUrls],
     [input.images, input.imageUrls],
   );
 
+  const af = (key: keyof ProductInput) => autoFilledFields.has(key);
+
+  // ── auto-detect when a valid Amazon URL with ASIN is pasted ─────────────────
+  async function handleUrlChange(url: string) {
+    updateField("amazonUrl", url);
+
+    const asin = extractAsin(url);
+    if (!asin || !isAmazonUrl(url) || url === lastFetchedUrl.current) return;
+
+    lastFetchedUrl.current = url;
+    setFetchStatus("loading");
+    setAutoFilledFields(new Set());
+
+    try {
+      const res = await fetch("/api/parse-pdp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
+
+      const payload = await res.json();
+
+      if (!res.ok || !payload.ok) {
+        setFetchStatus("error");
+        setFetchMessage(payload.error ?? "Could not detect product info for this URL.");
+        return;
+      }
+
+      const data: Partial<ProductInput> = payload.data ?? {};
+      const filled = new Set<keyof ProductInput>();
+
+      // Apply each detected field to the store
+      const updatedInput: ProductInput = { ...input, amazonUrl: url };
+
+      function applyField<K extends keyof ProductInput>(key: K, value: ProductInput[K] | undefined) {
+        if (value !== undefined && value !== null && value !== "") {
+          (updatedInput as Record<K, ProductInput[K]>)[key] = value;
+          filled.add(key);
+        }
+      }
+
+      applyField("productName", data.productName);
+      applyField("brand", data.brand);
+      applyField("sellerName", data.sellerName);
+      applyField("category", data.category);
+      applyField("price", data.price);
+      applyField("rating", data.rating);
+      applyField("description", data.description);
+      applyField("optionalWebsiteOrCompany", data.optionalWebsiteOrCompany);
+
+      if (data.bulletPoints?.length) {
+        updatedInput.bulletPoints = data.bulletPoints;
+        filled.add("bulletPoints");
+      }
+
+      if (data.imageUrls?.length) {
+        updatedInput.imageUrls = data.imageUrls;
+        filled.add("imageUrls");
+        setImageUrlText(data.imageUrls.join("\n"));
+      }
+
+      setInput(updatedInput);
+      setAutoFilledFields(filled);
+      setFetchStatus("success");
+      setFetchMessage(payload.source ?? "Product information detected");
+    } catch {
+      setFetchStatus("error");
+      setFetchMessage("Network error while fetching product data.");
+    }
+  }
+
   return (
     <Card>
       <CardHeader>
         <CardTitle>Step 1 - Product Input</CardTitle>
         <CardDescription>
-          Manual entry only. No Amazon scraping is used. URL is stored as a reference for your exported report.
+          Paste an Amazon PDP URL — fields are detected automatically. No HTML scraping is performed.
+          A product data API or mock catalog is used server-side.
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="grid gap-4 md:grid-cols-2">
+        {/* ── URL field + auto-fill banner ── */}
+        <div className="mb-5 space-y-3">
           <div className="space-y-2">
             <label className="text-sm font-medium">Amazon PDP URL</label>
-            <Input
-              value={input.amazonUrl}
-              onChange={(event) => updateField("amazonUrl", event.target.value)}
-              placeholder="https://www.amazon.com/dp/..."
-            />
+            <div className="relative">
+              <Input
+                value={input.amazonUrl}
+                onChange={(e) => void handleUrlChange(e.target.value)}
+                placeholder="https://www.amazon.com/dp/B0XXXXXXXX"
+                className={
+                  fetchStatus === "loading"
+                    ? "border-cyan-400 pr-9 ring-2 ring-cyan-300/40"
+                    : fetchStatus === "success"
+                      ? "border-emerald-400 pr-9 ring-2 ring-emerald-300/40"
+                      : fetchStatus === "error"
+                        ? "border-red-400 pr-9 ring-2 ring-red-300/40"
+                        : ""
+                }
+              />
+              {fetchStatus === "loading" && (
+                <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-cyan-500" />
+              )}
+              {fetchStatus === "success" && (
+                <CheckCircle2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-emerald-500" />
+              )}
+              {fetchStatus === "error" && (
+                <AlertCircle className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-red-500" />
+              )}
+            </div>
           </div>
+          <AutoFillBanner
+            status={fetchStatus}
+            message={fetchMessage}
+            filledCount={autoFilledFields.size}
+          />
+        </div>
+
+        <div className="grid gap-4 md:grid-cols-2">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Current Product Title</label>
+            <FieldLabel label="Current Product Title" autoFilled={af("productName")} />
             <Input
               value={input.productName}
               onChange={(event) => updateField("productName", event.target.value)}
@@ -64,11 +250,11 @@ export function ProductInputStep() {
             />
           </div>
           <div className="space-y-2">
-            <label className="text-sm font-medium">Brand</label>
+            <FieldLabel label="Brand" autoFilled={af("brand")} />
             <Input value={input.brand} onChange={(event) => updateField("brand", event.target.value)} placeholder="Brand" />
           </div>
           <div className="space-y-2">
-            <label className="text-sm font-medium">Seller Name</label>
+            <FieldLabel label="Seller Name" autoFilled={af("sellerName")} />
             <Input
               value={input.sellerName}
               onChange={(event) => updateField("sellerName", event.target.value)}
@@ -76,7 +262,7 @@ export function ProductInputStep() {
             />
           </div>
           <div className="space-y-2">
-            <label className="text-sm font-medium">Category</label>
+            <FieldLabel label="Category" autoFilled={af("category")} />
             <Select
               value={input.category}
               onChange={(event) => updateField("category", event.target.value)}
@@ -85,7 +271,7 @@ export function ProductInputStep() {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Price</label>
+              <FieldLabel label="Price" autoFilled={af("price")} />
               <Input
                 type="number"
                 min={0}
@@ -95,7 +281,7 @@ export function ProductInputStep() {
               />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Rating</label>
+              <FieldLabel label="Rating" autoFilled={af("rating")} />
               <Input
                 type="number"
                 min={0}
@@ -108,7 +294,7 @@ export function ProductInputStep() {
           </div>
 
           <div className="space-y-2 md:col-span-2">
-            <label className="text-sm font-medium">Bullet Points</label>
+            <FieldLabel label="Bullet Points" autoFilled={af("bulletPoints")} />
             <div className="space-y-2">
               {input.bulletPoints.map((point, index) => (
                 <div key={`bullet-${index}`} className="flex items-center gap-2">
@@ -147,7 +333,7 @@ export function ProductInputStep() {
           </div>
 
           <div className="space-y-2 md:col-span-2">
-            <label className="text-sm font-medium">Product Description</label>
+            <FieldLabel label="Product Description" autoFilled={af("description")} />
             <Textarea
               value={input.description}
               onChange={(event) => updateField("description", event.target.value)}
@@ -175,7 +361,7 @@ export function ProductInputStep() {
           </div>
 
           <div className="space-y-2 md:col-span-2">
-            <label className="text-sm font-medium">Optional Image URL List</label>
+            <FieldLabel label="Optional Image URL List" autoFilled={af("imageUrls")} />
             <Textarea
               value={imageUrlText}
               onChange={(event) => {
@@ -187,7 +373,7 @@ export function ProductInputStep() {
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Optional Website / Company</label>
+            <FieldLabel label="Optional Website / Company" autoFilled={af("optionalWebsiteOrCompany")} />
             <Input
               value={input.optionalWebsiteOrCompany}
               onChange={(event) => updateField("optionalWebsiteOrCompany", event.target.value)}
