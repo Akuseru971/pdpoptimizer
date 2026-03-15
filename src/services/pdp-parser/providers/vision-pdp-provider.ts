@@ -127,9 +127,10 @@ export class VisionPdpParserProvider implements PdpParserProvider {
 
   async parse(asin: string, amazonDomain: string): Promise<PdpParseResult> {
     const productUrl = `https://www.${amazonDomain}/dp/${asin}`;
-    const browser = await chromium.launch({ headless: true });
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
 
     try {
+      browser = await chromium.launch({ headless: true });
       const context = await browser.newContext({
         viewport: { width: 1440, height: 2400 },
         userAgent:
@@ -232,7 +233,9 @@ export class VisionPdpParserProvider implements PdpParserProvider {
         error: error instanceof Error ? error.message : "Vision parsing failed",
       };
     } finally {
-      await browser.close();
+      if (browser) {
+        await browser.close();
+      }
     }
   }
 }
