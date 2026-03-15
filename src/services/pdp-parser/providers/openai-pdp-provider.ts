@@ -43,29 +43,35 @@ function extractRelevantHtml(html: string): string {
 
 // ─── System prompt ────────────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are an Amazon product data extraction assistant.
-Your task is to extract structured product information from either:
-  (a) raw Amazon product page HTML provided by the user, or
-  (b) your own training knowledge when only an ASIN or URL is given.
+const SYSTEM_PROMPT = `You are a strict Amazon PDP extraction engine.
 
-Return ONLY a valid JSON object with the following keys (omit any field you cannot determine with confidence):
-{
-  "productName":  "Full product title as shown on Amazon",
-  "brand":        "Brand / manufacturer name",
-  "sellerName":   "Sold-by seller name (often same as brand)",
-  "category":     "Top-level product category",
-  "price":        29.99,
-  "rating":       4.5,
-  "bulletPoints": ["Key feature 1", "Key feature 2", "..."],
-  "description":  "Full product description paragraph",
-  "imageUrls":    ["https://example.com/image1.jpg", "..."]
-}
+Objective:
+- Extract product fields from Amazon PDP content with maximum accuracy.
+- If live HTML is provided, treat it as source of truth.
+- Use prior knowledge only when HTML is not available.
 
-Rules:
-- price and rating must be numbers, not strings.
-- bulletPoints must be a flat array of plain strings (no leading "–" or "•").
-- imageUrls must be absolute HTTPS URLs. Prefer hi-res Amazon CDN URLs (images-amazon.com).
-- Do NOT invent data. If a field is unknown, omit it.`;
+Return format:
+- Return ONLY one JSON object.
+- Use ONLY these exact keys (no aliases, no extra keys):
+  productName, brand, sellerName, category, price, rating, bulletPoints, description, imageUrls
+- Omit unknown fields. Never guess.
+
+Field mapping rules (critical):
+- productName: Full listing title only (from product title area). Never put brand-only text here.
+- brand: Brand/manufacturer only. Strip wrappers like "Visit the X Store".
+- sellerName: Merchant sold-by name. If not visible, you may reuse brand.
+- category: Top-level category/department (short label).
+- price: Current displayed product price, numeric decimal only (no currency symbol).
+- rating: Average star rating out of 5, numeric only.
+- bulletPoints: Main feature bullets only; plain strings; no duplicates; no leading bullets.
+- description: Long-form product description/A+ body text summary, not a duplicate of title.
+- imageUrls: Product gallery image URLs only (no logos/icons/sprites/ads), absolute https URLs.
+
+Quality checks before output:
+- Ensure price and rating are numbers, not strings.
+- Ensure bulletPoints is an array of strings.
+- Ensure imageUrls is an array of URLs.
+- If a value is low confidence or ambiguous, omit it.`;
 
 function normalizeImageUrls(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -162,8 +168,21 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
 
     // ── Step 2: ask GPT-4o-mini to extract structured data (with retry) ────────
     const userMessage = htmlContent
-      ? `Extract product information from the following Amazon product page HTML (ASIN: ${asin}):\n\n${htmlContent.slice(0, 14_000)}`
-      : `Extract product information for the Amazon product with ASIN "${asin}" sold on ${amazonDomain}.\nProduct URL: ${productUrl}\nUse your knowledge about this product if available.`;
+      ? [
+          `ASIN: ${asin}`,
+          `Amazon domain: ${amazonDomain}`,
+          "Mode: LIVE_HTML",
+          "Instruction: extract fields from this HTML only. If not explicitly present, omit.",
+          "HTML:",
+          htmlContent.slice(0, 14_000),
+        ].join("\n\n")
+      : [
+          `ASIN: ${asin}`,
+          `Amazon domain: ${amazonDomain}`,
+          `Product URL: ${productUrl}`,
+          "Mode: KNOWLEDGE_FALLBACK",
+          "Instruction: use best-effort knowledge; omit uncertain fields.",
+        ].join("\n\n");
 
     const MAX_RETRIES = 3;
     let lastError: unknown;
