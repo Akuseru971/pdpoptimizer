@@ -138,12 +138,38 @@ function canonicalizeAmazonImageUrl(url: string): string {
   return out;
 }
 
+function extractCarouselBlocks(html: string): string[] {
+  const blocks: string[] = [];
+
+  // IMPORTANT: we intentionally keep only the PDP image carousel sections.
+  // This excludes images from recommendations, ads, A+ content, and other page areas.
+  const patterns = [
+    /id=["']altImages["'][\s\S]{0,120000}?<\/ul>/i,
+    /id=["']imageBlock["'][\s\S]{0,160000}?<\/div>/i,
+    /id=["']imageBlockThumbs["'][\s\S]{0,120000}?<\/div>/i,
+    /id=["']ivImages["'][\s\S]{0,120000}?<\/ul>/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = html.match(pattern);
+    if (match?.[0]) blocks.push(match[0]);
+  }
+
+  return blocks;
+}
+
 function extractImageUrlsFromHtml(html: string): string[] {
   const found = new Set<string>();
+  const carouselBlocks = extractCarouselBlocks(html);
+
+  // Only parse URLs from carousel blocks. If not found, return no images instead of broad scraping.
+  if (!carouselBlocks.length) return [];
+
+  const carouselHtml = carouselBlocks.join("\n\n");
 
   // Direct image URLs in HTML attributes
   const attrPattern = /https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)(?:[^\s"'<>]*)/gi;
-  for (const match of html.matchAll(attrPattern)) {
+  for (const match of carouselHtml.matchAll(attrPattern)) {
     const raw = (match[0] ?? "").trim();
     if (!/images[-.]amazon\.com|media-amazon\.com/i.test(raw)) continue;
     if (/sprite|icon|logo|spacer|transparent|blank/i.test(raw)) continue;
@@ -159,7 +185,7 @@ function extractImageUrlsFromHtml(html: string): string[] {
     '"(?:hiRes|large|mainUrl|thumb|variant)"\\s*:\\s*"(https:\\\\/\\\\/[^\\"]+)"',
     "gi",
   );
-  for (const match of html.matchAll(jsonKeyPattern)) {
+  for (const match of carouselHtml.matchAll(jsonKeyPattern)) {
     const raw = (match[1] ?? "").replace(/\\\//g, "/");
     if (!/images[-.]amazon\.com|media-amazon\.com/i.test(raw)) continue;
     if (/sprite|icon|logo|spacer/i.test(raw)) continue;
@@ -171,7 +197,7 @@ function extractImageUrlsFromHtml(html: string): string[] {
 
   // data-a-dynamic-image JSON map  {"url": count, ...}
   const dynPattern = /data-a-dynamic-image=["']\{([^"']+)\}["']/gi;
-  for (const match of html.matchAll(dynPattern)) {
+  for (const match of carouselHtml.matchAll(dynPattern)) {
     const block = `{${match[1]}}`.replace(/&quot;/g, '"');
     try {
       const obj = JSON.parse(block) as Record<string, unknown>;
