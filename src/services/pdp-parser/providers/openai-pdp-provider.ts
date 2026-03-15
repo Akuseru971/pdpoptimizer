@@ -67,6 +67,69 @@ Rules:
 - imageUrls must be absolute HTTPS URLs. Prefer hi-res Amazon CDN URLs (images-amazon.com).
 - Do NOT invent data. If a field is unknown, omit it.`;
 
+const FIELD_MAPPING_PROMPT = `Field mapping rules (CRITICAL):
+- productName: ONLY the listing title (Amazon title / productTitle). Never put brand-only text here.
+- brand: Brand/manufacturer only. Do not include "Visit the ... Store" wrappers.
+- sellerName: The "Sold by" merchant. If unavailable, you may fallback to brand.
+- category: Product category path top node (e.g. "Home & Kitchen"). Not a bullet point.
+- price: Current final displayed price (buy box/deal/current), numeric decimal only.
+- rating: Average star rating out of 5, numeric only (e.g. 4.4).
+- bulletPoints: Key feature bullets only (3-7 preferred), no duplicates, no marketing fluff.
+- description: Long-form description / A+ text summary. Do not copy the title or bullets verbatim.
+- imageUrls: Product gallery image URLs only. Exclude logos, icons, ads, and sprite sheets.
+
+Output constraints:
+- Return JSON object only.
+- Use EXACT key names: productName, brand, sellerName, category, price, rating, bulletPoints, description, imageUrls.
+- If unsure, omit the field instead of guessing.`;
+
+function pickFirstString(raw: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = raw[key];
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      if (trimmed) return trimmed;
+    }
+  }
+  return undefined;
+}
+
+function pickFirstArray(raw: Record<string, unknown>, keys: string[]): unknown[] | undefined {
+  for (const key of keys) {
+    const value = raw[key];
+    if (Array.isArray(value) && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+function toNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const cleaned = value.replace(/[^0-9.,]/g, "").replace(",", ".");
+    const parsed = Number(cleaned);
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function normalizeBulletPoints(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const bullets = value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .map((item) => item.replace(/^[\-•–\*\s]+/, "").trim())
+    .filter(Boolean);
+  return bullets.length ? Array.from(new Set(bullets)).slice(0, 10) : undefined;
+}
+
+function normalizeImageUrls(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const urls = value
+    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .filter((url) => /^https:\/\//i.test(url))
+    .filter((url) => !/sprite|icon|logo|spacer/i.test(url));
+  return urls.length ? Array.from(new Set(urls)).slice(0, 20) : undefined;
+}
+
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
 export class OpenAIPdpParserProvider implements PdpParserProvider {
@@ -135,24 +198,37 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
           response_format: { type: "json_object" },
           temperature: 0,
           messages: [
-            { role: "system", content: SYSTEM_PROMPT },
+            { role: "system", content: `${SYSTEM_PROMPT}\n\n${FIELD_MAPPING_PROMPT}` },
             { role: "user", content: userMessage },
           ],
         });
 
-        const raw = JSON.parse(completion.choices[0].message.content ?? "{}");
+        const raw = JSON.parse(completion.choices[0].message.content ?? "{}") as Record<
+          string,
+          unknown
+        >;
 
-        // Coerce price/rating to numbers if GPT returned strings
+        // Normalize common alias keys defensively to avoid bad mapping.
+        const productName = pickFirstString(raw, ["productName", "title", "name", "product_title"]);
+        const brand = pickFirstString(raw, ["brand", "manufacturer"]);
+        const sellerName = pickFirstString(raw, ["sellerName", "seller", "soldBy", "merchant"]);
+        const category = pickFirstString(raw, ["category", "department", "categoryName"]);
+        const description = pickFirstString(raw, ["description", "productDescription", "about"]);
+        const bulletsRaw = pickFirstArray(raw, ["bulletPoints", "features", "bullets", "keyFeatures"]);
+        const imagesRaw = pickFirstArray(raw, ["imageUrls", "images", "image_urls", "gallery"]);
+        const priceValue = raw.price ?? raw.currentPrice ?? raw.salePrice;
+        const ratingValue = raw.rating ?? raw.stars ?? raw.reviewRating;
+
         const data: ParsedPdpData = {
-          productName: raw.productName ?? undefined,
-          brand: raw.brand ?? undefined,
-          sellerName: raw.sellerName ?? undefined,
-          category: raw.category ?? undefined,
-          price: raw.price !== undefined ? Number(raw.price) || undefined : undefined,
-          rating: raw.rating !== undefined ? Number(raw.rating) || undefined : undefined,
-          bulletPoints: Array.isArray(raw.bulletPoints) ? raw.bulletPoints : undefined,
-          description: raw.description ?? undefined,
-          imageUrls: Array.isArray(raw.imageUrls) ? raw.imageUrls.filter(Boolean) : undefined,
+          productName,
+          brand,
+          sellerName,
+          category,
+          price: toNumber(priceValue),
+          rating: toNumber(ratingValue),
+          bulletPoints: normalizeBulletPoints(bulletsRaw),
+          description,
+          imageUrls: normalizeImageUrls(imagesRaw),
         };
 
         return { ok: true, asin, source, data };
