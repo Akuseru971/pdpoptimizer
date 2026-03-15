@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { extractAsin, amazonDomainFromUrl, isAmazonUrl } from "@/lib/asin";
 import { getPdpParserProvider } from "@/services/pdp-parser";
+import { HtmlPdpParserProvider } from "@/services/pdp-parser/providers/html-pdp-provider";
 import { MockPdpParserProvider } from "@/services/pdp-parser/providers/mock-pdp-provider";
 
 export async function POST(req: Request) {
@@ -34,6 +35,18 @@ export async function POST(req: Request) {
     const domain = amazonDomainFromUrl(url);
     const provider = getPdpParserProvider();
     let result = await provider.parse(asin, domain);
+
+    // If Vision fails (captcha/headless block/runtime issue), fallback to deterministic HTML parser.
+    if (!result.ok && provider.name === "VisionPdpParserProvider") {
+      const html = new HtmlPdpParserProvider();
+      const htmlResult = await html.parse(asin, domain);
+      if (htmlResult.ok) {
+        result = {
+          ...htmlResult,
+          warning: "Vision parsing failed, HTML parser fallback used.",
+        };
+      }
+    }
 
     // ── Quota / billing fallback ──────────────────────────────────────────────
     // If the primary provider hit a quota limit, cascade to the mock so the user
