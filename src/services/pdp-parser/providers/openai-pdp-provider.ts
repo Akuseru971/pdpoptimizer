@@ -120,54 +120,79 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
       // Fetch failed (timeout, network error, etc.) — fall through to ASIN-only mode
     }
 
-    // ── Step 2: ask GPT-4o-mini to extract structured data ────────────────────
-    try {
-      const userMessage = htmlContent
-        ? `Extract product information from the following Amazon product page HTML (ASIN: ${asin}):\n\n${htmlContent.slice(0, 14_000)}`
-        : `Extract product information for the Amazon product with ASIN "${asin}" sold on ${amazonDomain}.\nProduct URL: ${productUrl}\nUse your knowledge about this product if available.`;
+    // ── Step 2: ask GPT-4o-mini to extract structured data (with retry) ────────
+    const userMessage = htmlContent
+      ? `Extract product information from the following Amazon product page HTML (ASIN: ${asin}):\n\n${htmlContent.slice(0, 14_000)}`
+      : `Extract product information for the Amazon product with ASIN "${asin}" sold on ${amazonDomain}.\nProduct URL: ${productUrl}\nUse your knowledge about this product if available.`;
 
-      const completion = await this.client.chat.completions.create({
-        model: "gpt-4o-mini",
-        response_format: { type: "json_object" },
-        temperature: 0,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: userMessage },
-        ],
-      });
+    const MAX_RETRIES = 3;
+    let lastError: unknown;
 
-      const raw = JSON.parse(completion.choices[0].message.content ?? "{}");
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+      try {
+        const completion = await this.client.chat.completions.create({
+          model: "gpt-4o-mini",
+          response_format: { type: "json_object" },
+          temperature: 0,
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: userMessage },
+          ],
+        });
 
-      // Coerce price/rating to numbers if GPT returned strings
-      const data: ParsedPdpData = {
-        productName: raw.productName ?? undefined,
-        brand: raw.brand ?? undefined,
-        sellerName: raw.sellerName ?? undefined,
-        category: raw.category ?? undefined,
-        price: raw.price !== undefined ? Number(raw.price) || undefined : undefined,
-        rating: raw.rating !== undefined ? Number(raw.rating) || undefined : undefined,
-        bulletPoints: Array.isArray(raw.bulletPoints) ? raw.bulletPoints : undefined,
-        description: raw.description ?? undefined,
-        imageUrls: Array.isArray(raw.imageUrls) ? raw.imageUrls.filter(Boolean) : undefined,
-      };
+        const raw = JSON.parse(completion.choices[0].message.content ?? "{}");
 
-      return { ok: true, asin, source, data };
-    } catch (error) {
-      // Detect quota / billing errors (HTTP 429) from the OpenAI SDK
-      const isQuota =
-        error instanceof Error &&
-        (error.message.includes("429") ||
-          error.message.toLowerCase().includes("quota") ||
-          error.message.toLowerCase().includes("billing"));
+        // Coerce price/rating to numbers if GPT returned strings
+        const data: ParsedPdpData = {
+          productName: raw.productName ?? undefined,
+          brand: raw.brand ?? undefined,
+          sellerName: raw.sellerName ?? undefined,
+          category: raw.category ?? undefined,
+          price: raw.price !== undefined ? Number(raw.price) || undefined : undefined,
+          rating: raw.rating !== undefined ? Number(raw.rating) || undefined : undefined,
+          bulletPoints: Array.isArray(raw.bulletPoints) ? raw.bulletPoints : undefined,
+          description: raw.description ?? undefined,
+          imageUrls: Array.isArray(raw.imageUrls) ? raw.imageUrls.filter(Boolean) : undefined,
+        };
 
-      return {
-        ok: false,
-        asin,
-        source: "OpenAI",
-        data: {},
-        error: error instanceof Error ? error.message : "OpenAI extraction failed",
-        ...(isQuota ? { quotaExceeded: true } : {}),
-      };
+        return { ok: true, asin, source, data };
+      } catch (error) {
+        lastError = error;
+
+        const msg = error instanceof Error ? error.message : "";
+        const isRateLimit = msg.includes("429") || msg.toLowerCase().includes("rate limit");
+        // Billing/account-level quota — no point retrying
+        const isBillingQuota =
+          msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("billing");
+
+        if (isBillingQuota) {
+          return {
+            ok: false,
+            asin,
+            source: "OpenAI",
+            data: {},
+            error: msg || "OpenAI quota exceeded",
+            quotaExceeded: true,
+          };
+        }
+
+        if (isRateLimit && attempt < MAX_RETRIES - 1) {
+          // Exponential backoff: 1s, 2s, 4s
+          await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
+          continue;
+        }
+
+        // Non-retryable error or retries exhausted
+        break;
+      }
     }
+
+    return {
+      ok: false,
+      asin,
+      source: "OpenAI",
+      data: {},
+      error: lastError instanceof Error ? lastError.message : "OpenAI extraction failed",
+    };
   }
 }
