@@ -130,6 +130,35 @@ function normalizeImageUrls(value: unknown): string[] | undefined {
   return urls.length ? Array.from(new Set(urls)).slice(0, 20) : undefined;
 }
 
+function extractAmazonImageUrlsFromHtml(html: string): string[] {
+  const found = new Set<string>();
+
+  // Direct image URLs in HTML attributes.
+  const attrPattern = /https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)(?:[^\s"'<>]*)/gi;
+  for (const match of html.matchAll(attrPattern)) {
+    const candidate = (match[0] ?? "").trim();
+    if (!candidate) continue;
+    if (!/images[-.]amazon\.com|media-amazon\.com/i.test(candidate)) continue;
+    if (/sprite|icon|logo|spacer/i.test(candidate)) continue;
+    found.add(candidate.replace(/\._[^.]+\./, "."));
+  }
+
+  // JSON-embedded image objects (hiRes/large/mainUrl keys are common on Amazon PDP).
+  const jsonKeyPattern = new RegExp(
+    '"(?:hiRes|large|mainUrl|thumb|variant)"\\s*:\\s*"(https:\\\\/\\\\/[^\\"]+)"',
+    "gi",
+  );
+  for (const match of html.matchAll(jsonKeyPattern)) {
+    const candidate = (match[1] ?? "").replace(/\\\//g, "/").trim();
+    if (!candidate) continue;
+    if (!/images[-.]amazon\.com|media-amazon\.com/i.test(candidate)) continue;
+    if (/sprite|icon|logo|spacer/i.test(candidate)) continue;
+    found.add(candidate.replace(/\._[^.]+\./, "."));
+  }
+
+  return Array.from(found).slice(0, 30);
+}
+
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
 export class OpenAIPdpParserProvider implements PdpParserProvider {
@@ -146,6 +175,7 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
   async parse(asin: string, amazonDomain: string): Promise<PdpParseResult> {
     const productUrl = `https://www.${amazonDomain}/dp/${asin}`;
     let htmlContent = "";
+    let htmlRaw = "";
     let source = "OpenAI (from training data)";
 
     // ── Step 1: attempt server-side fetch ─────────────────────────────────────
@@ -168,6 +198,7 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
 
       if (resp.ok) {
         const html = await resp.text();
+        htmlRaw = html;
         // If Amazon returned a CAPTCHA page, skip the HTML
         const isCaptcha =
           html.includes("Type the characters you see in this image") ||
@@ -218,6 +249,9 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
         const imagesRaw = pickFirstArray(raw, ["imageUrls", "images", "image_urls", "gallery"]);
         const priceValue = raw.price ?? raw.currentPrice ?? raw.salePrice;
         const ratingValue = raw.rating ?? raw.stars ?? raw.reviewRating;
+        const extractedFromHtml = htmlRaw ? extractAmazonImageUrlsFromHtml(htmlRaw) : [];
+        const mappedImages = normalizeImageUrls(imagesRaw) ?? [];
+        const imageUrls = Array.from(new Set([...mappedImages, ...extractedFromHtml])).slice(0, 30);
 
         const data: ParsedPdpData = {
           productName,
@@ -228,7 +262,7 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
           rating: toNumber(ratingValue),
           bulletPoints: normalizeBulletPoints(bulletsRaw),
           description,
-          imageUrls: normalizeImageUrls(imagesRaw),
+          imageUrls: imageUrls.length ? imageUrls : undefined,
         };
 
         return { ok: true, asin, source, data };

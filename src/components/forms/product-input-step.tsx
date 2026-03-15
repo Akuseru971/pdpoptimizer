@@ -5,6 +5,8 @@ import {
   AlertCircle,
   AlertTriangle,
   CheckCircle2,
+  Copy,
+  ExternalLink,
   ImagePlus,
   Loader2,
   Plus,
@@ -121,11 +123,16 @@ function FieldLabel({
 export function ProductInputStep() {
   const { input, updateField, setInput, resetToDemo } = usePdpStore();
   const [imageUrlText, setImageUrlText] = useState(input.imageUrls.join("\n"));
+  const [copiedUrl, setCopiedUrl] = useState<string | null>(null);
   const [fetchStatus, setFetchStatus] = useState<FetchStatus>("idle");
   const [fetchMessage, setFetchMessage] = useState("");
   const [autoFilledFields, setAutoFilledFields] = useState<AutoFilledFields>(new Set());
   // keep the last URL that was auto-fetched to debounce duplicate calls
   const lastFetchedUrl = useRef<string>("");
+  const detectedUrlImages = useMemo(
+    () => input.images.filter((img) => img.source === "url"),
+    [input.images],
+  );
 
   const allImagesPreview = useMemo(
     () => [...input.images.map((image) => image.url), ...input.imageUrls],
@@ -371,7 +378,7 @@ export function ProductInputStep() {
           </div>
 
           {/* ── Detected images ── */}
-          {input.images.some((img) => img.source === "url") && (
+          {detectedUrlImages.length > 0 && (
             <div className="space-y-3 md:col-span-2">
               <div className="flex items-center gap-2">
                 <label className="text-sm font-medium">Detected Images from Amazon</label>
@@ -379,15 +386,17 @@ export function ProductInputStep() {
                   <Sparkles className="h-2.5 w-2.5" /> Auto-detected
                 </span>
               </div>
-              <div className="grid grid-cols-3 gap-3 md:grid-cols-5">
-                {input.images
-                  .filter((img) => img.source === "url")
-                  .map((img) => (
-                    <div key={img.id} className="group relative">
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+                {detectedUrlImages.map((img, index) => (
+                  <div
+                    key={img.id}
+                    className="rounded-2xl border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-950"
+                  >
+                    <div className="relative overflow-hidden rounded-xl border border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900">
                       <img
                         src={img.url}
                         alt={img.name}
-                        className="aspect-square w-full rounded-xl border border-emerald-200 object-cover dark:border-emerald-800"
+                        className="h-52 w-full object-contain"
                       />
                       <button
                         type="button"
@@ -397,13 +406,48 @@ export function ProductInputStep() {
                             input.images.filter((i) => i.id !== img.id),
                           )
                         }
-                        className="absolute right-1 top-1 hidden rounded-full bg-zinc-900/70 p-0.5 text-white group-hover:flex"
+                        className="absolute right-2 top-2 rounded-full bg-zinc-900/70 p-1 text-white"
                         aria-label="Remove detected image"
                       >
                         <Trash2 className="h-3 w-3" />
                       </button>
                     </div>
-                  ))}
+
+                    <div className="mt-3 space-y-2">
+                      <p className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                        Image URL {index + 1}
+                      </p>
+                      <div className="rounded-lg border border-zinc-200 bg-zinc-50 px-2 py-1 text-xs text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300">
+                        <p className="truncate" title={img.url}>
+                          {img.url}
+                        </p>
+                      </div>
+                      <div className="flex gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => window.open(img.url, "_blank", "noopener,noreferrer")}
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" /> Open
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={async () => {
+                            await navigator.clipboard.writeText(img.url);
+                            setCopiedUrl(img.id);
+                            setTimeout(() => setCopiedUrl(null), 1200);
+                          }}
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                          {copiedUrl === img.id ? "Copied" : "Copy URL"}
+                        </Button>
+                      </div>
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           )}
