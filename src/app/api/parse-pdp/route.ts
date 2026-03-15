@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { extractAsin, amazonDomainFromUrl, isAmazonUrl } from "@/lib/asin";
 import { getPdpParserProvider } from "@/services/pdp-parser";
+import { MockPdpParserProvider } from "@/services/pdp-parser/providers/mock-pdp-provider";
 
 export async function POST(req: Request) {
   try {
@@ -32,7 +33,20 @@ export async function POST(req: Request) {
 
     const domain = amazonDomainFromUrl(url);
     const provider = getPdpParserProvider();
-    const result = await provider.parse(asin, domain);
+    let result = await provider.parse(asin, domain);
+
+    // ── Quota / billing fallback ──────────────────────────────────────────────
+    // If the primary provider hit a quota limit, cascade to the mock so the user
+    // still gets a usable response instead of a blank error screen.
+    if (!result.ok && result.quotaExceeded && !(provider instanceof MockPdpParserProvider)) {
+      const mock = new MockPdpParserProvider();
+      result = await mock.parse(asin, domain);
+      result = {
+        ...result,
+        warning:
+          "OpenAI quota exceeded — demo data shown. Add credits at platform.openai.com or set RAINFOREST_API_KEY.",
+      };
+    }
 
     return NextResponse.json({ ...result, provider: provider.name });
   } catch (error) {

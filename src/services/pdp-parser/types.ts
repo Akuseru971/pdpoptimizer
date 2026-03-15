@@ -23,6 +23,10 @@ export interface PdpParseResult {
   source: string;
   data: ParsedPdpData;
   error?: string;
+  /** True when the primary provider hit a quota/billing limit and the result came from a fallback. */
+  warning?: string;
+  /** Internal flag set by OpenAI provider to signal quota exhaustion. */
+  quotaExceeded?: boolean;
 }
 
 export interface PdpParserProvider {

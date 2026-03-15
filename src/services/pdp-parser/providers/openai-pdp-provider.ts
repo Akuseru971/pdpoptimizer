@@ -153,12 +153,20 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
 
       return { ok: true, asin, source, data };
     } catch (error) {
+      // Detect quota / billing errors (HTTP 429) from the OpenAI SDK
+      const isQuota =
+        error instanceof Error &&
+        (error.message.includes("429") ||
+          error.message.toLowerCase().includes("quota") ||
+          error.message.toLowerCase().includes("billing"));
+
       return {
         ok: false,
         asin,
         source: "OpenAI",
         data: {},
         error: error instanceof Error ? error.message : "OpenAI extraction failed",
+        ...(isQuota ? { quotaExceeded: true } : {}),
       };
     }
   }

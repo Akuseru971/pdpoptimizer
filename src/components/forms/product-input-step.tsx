@@ -3,6 +3,7 @@
 import { useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   ImagePlus,
   Loader2,
@@ -40,7 +41,7 @@ function parseImageUrlList(value: string) {
     .filter((url) => /^https?:\/\//.test(url));
 }
 
-type FetchStatus = "idle" | "loading" | "success" | "error";
+type FetchStatus = "idle" | "loading" | "success" | "warning" | "error";
 
 type AutoFilledFields = Set<keyof ProductInput>;
 
@@ -71,6 +72,15 @@ function AutoFillBanner({
       <div className="flex items-center gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200">
         <AlertCircle className="h-4 w-4 shrink-0" />
         {message}
+      </div>
+    );
+  }
+
+  if (status === "warning") {
+    return (
+      <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+        <span>{message}</span>
       </div>
     );
   }
@@ -198,8 +208,14 @@ export function ProductInputStep() {
 
       setInput(updatedInput);
       setAutoFilledFields(filled);
-      setFetchStatus("success");
-      setFetchMessage(payload.source ?? "Product information detected");
+
+      if (payload.warning) {
+        setFetchStatus("warning");
+        setFetchMessage(payload.warning);
+      } else {
+        setFetchStatus("success");
+        setFetchMessage(payload.source ?? "Product information detected");
+      }
     } catch {
       setFetchStatus("error");
       setFetchMessage("Network error while fetching product data.");
