@@ -45,33 +45,113 @@ function extractRelevantHtml(html: string): string {
 
 const SYSTEM_PROMPT = `You are a strict Amazon PDP extraction engine.
 
-Objective:
-- Extract product fields from Amazon PDP content with maximum accuracy.
-- If live HTML is provided, treat it as source of truth.
-- Use prior knowledge only when HTML is not available.
+Your job is to map all product information visible on an Amazon product detail page for a single ASIN into a normalized JSON object.
 
-Return format:
-- Return ONLY one JSON object.
-- Use ONLY these exact keys (no aliases, no extra keys):
-  productName, brand, sellerName, category, price, rating, bulletPoints, description, imageUrls
-- Omit unknown fields. Never guess.
+You must follow these rules strictly:
+1. Extract only information that is explicitly present in the provided inputs.
+2. Never invent, infer, or guess missing values.
+3. If a value is ambiguous, conflicting, or not visible, return null.
+4. Ignore recommendations, sponsored blocks, and unrelated offers.
+5. Distinguish carefully between brand, seller, manufacturer, ship_from, sold_by.
+6. Normalize values where possible: numeric prices/ratings/review_count.
+7. Preserve evidence for important fields.
+8. If multiple candidate values exist, choose the one linked to the main PDP.
+9. Extract variation selectors separately when present.
+10. Output JSON only; no markdown; no extra explanations.
+11. Absent fields must be null/[]/{} depending on schema.
+12. Confidence must reflect certainty from provided page content only.
 
-Field mapping rules (critical):
-- productName: Full listing title only (from product title area). Never put brand-only text here.
-- brand: Brand/manufacturer only. Strip wrappers like "Visit the X Store".
-- sellerName: Merchant sold-by name. If not visible, you may reuse brand.
-- category: Top-level category/department (short label).
-- price: Current displayed product price, numeric decimal only (no currency symbol).
-- rating: Average star rating out of 5, numeric only.
-- bulletPoints: Main feature bullets only; plain strings; no duplicates; no leading bullets.
-- description: Long-form product description/A+ body text summary, not a duplicate of title.
-- imageUrls: Product gallery image URLs only (no logos/icons/sprites/ads), absolute https URLs.
+Extraction priority:
+1. Main title area
+2. Buy box / offer area
+3. Bullet points
+4. Product details / technical details / attributes tables
+5. Variation selectors
+6. A+ / brand content
+7. OCR-visible screenshot text
+8. URL / ASIN metadata`;
 
-Quality checks before output:
-- Ensure price and rating are numbers, not strings.
-- Ensure bulletPoints is an array of strings.
-- Ensure imageUrls is an array of URLs.
-- If a value is low confidence or ambiguous, omit it.`;
+const USER_PROMPT_SCHEMA = `Return only valid JSON following this exact structure:
+{
+  "asin": { "value": "string or null", "confidence": "high|medium|low", "evidence_text": "string", "evidence_source": "title_area|buy_box|bullets|details_table|technical_details|variation_selector|a_plus|image_ocr|url|metadata|not_found" },
+  "url": "string or null",
+  "marketplace": "string or null",
+  "product_title": { "value": "string or null", "confidence": "high|medium|low", "evidence_text": "string", "evidence_source": "title_area|buy_box|bullets|details_table|technical_details|variation_selector|a_plus|image_ocr|url|metadata|not_found" },
+  "brand": { "value": "string or null", "confidence": "high|medium|low", "evidence_text": "string", "evidence_source": "title_area|buy_box|bullets|details_table|technical_details|variation_selector|a_plus|image_ocr|url|metadata|not_found" },
+  "seller": { "value": "string or null", "confidence": "high|medium|low", "evidence_text": "string", "evidence_source": "title_area|buy_box|bullets|details_table|technical_details|variation_selector|a_plus|image_ocr|url|metadata|not_found" },
+  "sold_by": { "value": "string or null", "confidence": "high|medium|low", "evidence_text": "string", "evidence_source": "title_area|buy_box|bullets|details_table|technical_details|variation_selector|a_plus|image_ocr|url|metadata|not_found" },
+  "price": {
+    "current_price": { "value": "number or null", "confidence": "high|medium|low", "evidence_text": "string", "evidence_source": "title_area|buy_box|bullets|details_table|technical_details|variation_selector|a_plus|image_ocr|url|metadata|not_found" },
+    "original_price": { "value": "number or null", "confidence": "high|medium|low", "evidence_text": "string", "evidence_source": "title_area|buy_box|bullets|details_table|technical_details|variation_selector|a_plus|image_ocr|url|metadata|not_found" },
+    "currency": "string or null",
+    "discount_text": "string or null"
+  },
+  "rating": { "value": "number or null", "confidence": "high|medium|low", "evidence_text": "string", "evidence_source": "title_area|buy_box|bullets|details_table|technical_details|variation_selector|a_plus|image_ocr|url|metadata|not_found" },
+  "review_count": { "value": "integer or null", "confidence": "high|medium|low", "evidence_text": "string", "evidence_source": "title_area|buy_box|bullets|details_table|technical_details|variation_selector|a_plus|image_ocr|url|metadata|not_found" },
+  "bullet_points": [{ "text": "string" }],
+  "description": "string or null",
+  "image_count": "integer or null",
+  "image_urls": ["string"],
+  "category_path": ["string"]
+}`;
+
+function unwrapValue(node: unknown): unknown {
+  if (node && typeof node === "object" && "value" in (node as Record<string, unknown>)) {
+    return (node as Record<string, unknown>).value;
+  }
+  return node;
+}
+
+function asString(node: unknown): string | undefined {
+  const value = unwrapValue(node);
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function asNumber(node: unknown): number | undefined {
+  const value = unwrapValue(node);
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string") {
+    const parsed = Number(value.replace(/[^0-9.,]/g, "").replace(",", "."));
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function asBulletList(node: unknown): string[] | undefined {
+  if (!Array.isArray(node)) return undefined;
+  const list = node
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (item && typeof item === "object") {
+        const text = (item as Record<string, unknown>).text;
+        return typeof text === "string" ? text.trim() : "";
+      }
+      return "";
+    })
+    .filter(Boolean);
+  return list.length ? Array.from(new Set(list)).slice(0, 10) : undefined;
+}
+
+function mapStructuredResponseToParsedPdpData(raw: Record<string, unknown>): ParsedPdpData {
+  const categoryPath = Array.isArray(raw.category_path)
+    ? raw.category_path.filter((x): x is string => typeof x === "string" && !!x.trim())
+    : [];
+
+  const imageUrlsFromStructured = Array.isArray(raw.image_urls) ? normalizeImageUrls(raw.image_urls) : undefined;
+  const imageUrlsFromLegacy = Array.isArray(raw.imageUrls) ? normalizeImageUrls(raw.imageUrls) : undefined;
+
+  return {
+    productName: asString(raw.product_title) ?? asString(raw.productName),
+    brand: asString(raw.brand),
+    sellerName: asString(raw.sold_by) ?? asString(raw.seller) ?? asString(raw.sellerName),
+    category: categoryPath[0] ?? asString(raw.category),
+    price: asNumber((raw.price as Record<string, unknown> | undefined)?.current_price) ?? asNumber(raw.price),
+    rating: asNumber(raw.rating),
+    bulletPoints: asBulletList(raw.bullet_points) ?? asBulletList(raw.bulletPoints),
+    description: asString(raw.description),
+    imageUrls: imageUrlsFromStructured ?? imageUrlsFromLegacy,
+  };
+}
 
 function normalizeImageUrls(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -272,22 +352,21 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
     }
 
     // ── Step 2: ask GPT-4o-mini to extract structured data (with retry) ────────
-    const userMessage = htmlContent
-      ? [
-          `ASIN: ${asin}`,
-          `Amazon domain: ${amazonDomain}`,
-          "Mode: LIVE_HTML",
-          "Instruction: extract fields from this HTML only. If not explicitly present, omit.",
-          "HTML:",
-          htmlContent.slice(0, 14_000),
-        ].join("\n\n")
-      : [
-          `ASIN: ${asin}`,
-          `Amazon domain: ${amazonDomain}`,
-          `Product URL: ${productUrl}`,
-          "Mode: KNOWLEDGE_FALLBACK",
-          "Instruction: use best-effort knowledge; omit uncertain fields.",
-        ].join("\n\n");
+    const pageText = htmlContent ? stripTags(htmlContent).slice(0, 18000) : "";
+    const userMessage = [
+      "Map this Amazon PDP into the required JSON structure.",
+      `ASIN: ${asin}`,
+      `URL: ${productUrl}`,
+      `Marketplace: ${amazonDomain}`,
+      "Page language: en",
+      "Visible text extracted from page:",
+      pageText || "",
+      "Optional OCR text extracted from screenshots:",
+      "",
+      "Optional page metadata:",
+      JSON.stringify({ source: source, marketplace: amazonDomain }),
+      USER_PROMPT_SCHEMA,
+    ].join("\n\n");
 
     const MAX_RETRIES = 3;
     let lastError: unknown;
@@ -306,21 +385,15 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
         });
 
         const raw = JSON.parse(completion.choices[0].message.content ?? "{}") as Record<string, unknown>;
-        const imagesRaw = Array.isArray(raw.imageUrls) ? raw.imageUrls : undefined;
+        const dataFromModel = mapStructuredResponseToParsedPdpData(raw);
+        const imagesRaw = dataFromModel.imageUrls;
         const extractedFromHtml = htmlRaw ? extractAmazonImageUrlsFromHtml(htmlRaw) : [];
         const mappedImages = normalizeImageUrls(imagesRaw) ?? [];
         const imageUrls = Array.from(new Set([...mappedImages, ...extractedFromHtml])).slice(0, 30);
 
         // Keep the original field mapping behavior that was previously stable.
         const dataFromLlm: ParsedPdpData = {
-          productName: typeof raw.productName === "string" ? raw.productName : undefined,
-          brand: typeof raw.brand === "string" ? raw.brand : undefined,
-          sellerName: typeof raw.sellerName === "string" ? raw.sellerName : undefined,
-          category: typeof raw.category === "string" ? raw.category : undefined,
-          price: raw.price !== undefined ? Number(raw.price) || undefined : undefined,
-          rating: raw.rating !== undefined ? Number(raw.rating) || undefined : undefined,
-          bulletPoints: Array.isArray(raw.bulletPoints) ? (raw.bulletPoints as string[]) : undefined,
-          description: typeof raw.description === "string" ? raw.description : undefined,
+          ...dataFromModel,
           imageUrls: imageUrls.length ? imageUrls : undefined,
         };
 
