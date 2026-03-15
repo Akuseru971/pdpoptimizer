@@ -34,16 +34,19 @@ export async function POST(req: Request) {
 
     const domain = amazonDomainFromUrl(url);
     const provider = getPdpParserProvider();
+    let providerUsed = provider.name;
     let result = await provider.parse(asin, domain);
 
-    // If Vision fails (captcha/headless block/runtime issue), fallback to deterministic HTML parser.
+    // If Vision fails (captcha/headless/runtime issue), fallback to deterministic HTML parser.
     if (!result.ok && provider.name === "VisionPdpParserProvider") {
       const html = new HtmlPdpParserProvider();
       const htmlResult = await html.parse(asin, domain);
       if (htmlResult.ok) {
+        providerUsed = html.name;
         result = {
           ...htmlResult,
-          warning: "Vision parsing failed, HTML parser fallback used.",
+          warning:
+            "Vision parser unavailable in this environment. HTML parser fallback used.",
         };
       }
     }
@@ -54,6 +57,7 @@ export async function POST(req: Request) {
     if (!result.ok && result.quotaExceeded && !(provider instanceof MockPdpParserProvider)) {
       const mock = new MockPdpParserProvider();
       result = await mock.parse(asin, domain);
+      providerUsed = mock.name;
       result = {
         ...result,
         warning:
@@ -61,7 +65,19 @@ export async function POST(req: Request) {
       };
     }
 
-    return NextResponse.json({ ...result, provider: provider.name });
+    // Final safety net: never expose low-level runtime errors to end users.
+    if (!result.ok) {
+      const mock = new MockPdpParserProvider();
+      const mockResult = await mock.parse(asin, domain);
+      providerUsed = mock.name;
+      result = {
+        ...mockResult,
+        warning:
+          "Live parsing unavailable right now (Amazon block or runtime limitation). Demo data shown as fallback.",
+      };
+    }
+
+    return NextResponse.json({ ...result, provider: providerUsed });
   } catch (error) {
     return NextResponse.json(
       {
