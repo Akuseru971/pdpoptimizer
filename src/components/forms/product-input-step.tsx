@@ -43,6 +43,18 @@ function parseImageUrlList(value: string) {
     .filter((url) => /^https?:\/\//.test(url));
 }
 
+function fallbackAmazonImageUrl(url: string): string | null {
+  if (!url || !/^https?:\/\//.test(url)) return null;
+  // First fallback: strip Amazon size token if present
+  const stripped = url.replace(/\._[^.]+\./, ".");
+  if (stripped !== url) return stripped;
+  // Second fallback: append jpg extension for media URLs missing extension
+  if (/media-amazon\.com|images-amazon\.com/i.test(url) && !/\.(jpg|jpeg|png|webp)$/i.test(url)) {
+    return `${url}.jpg`;
+  }
+  return null;
+}
+
 type FetchStatus = "idle" | "loading" | "success" | "warning" | "error";
 
 type AutoFilledFields = Set<keyof ProductInput>;
@@ -397,6 +409,18 @@ export function ProductInputStep() {
                         src={img.url}
                         alt={img.name}
                         className="h-52 w-full object-contain"
+                        onError={(event) => {
+                          const element = event.currentTarget;
+                          const currentSrc = element.src;
+                          const alreadyRetried = element.dataset.retried === "1";
+                          if (alreadyRetried) return;
+
+                          const nextSrc = fallbackAmazonImageUrl(currentSrc);
+                          if (nextSrc && nextSrc !== currentSrc) {
+                            element.dataset.retried = "1";
+                            element.src = nextSrc;
+                          }
+                        }}
                       />
                       <button
                         type="button"

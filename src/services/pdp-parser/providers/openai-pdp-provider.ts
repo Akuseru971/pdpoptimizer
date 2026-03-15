@@ -76,10 +76,22 @@ Quality checks before output:
 function normalizeImageUrls(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const urls = value
-    .map((item) => (typeof item === "string" ? item.trim() : ""))
+    .map((item) => (typeof item === "string" ? canonicalizeAmazonImageUrl(item) : ""))
     .filter((url) => /^https:\/\//i.test(url))
     .filter((url) => !/sprite|icon|logo|spacer/i.test(url));
   return urls.length ? Array.from(new Set(urls)).slice(0, 20) : undefined;
+}
+
+function canonicalizeAmazonImageUrl(url: string): string {
+  let out = url.trim().replace(/\\\//g, "/").replace(/["',\s]+$/g, "");
+  if (!out.startsWith("https://")) return out;
+  // Remove query/hash noise that often breaks direct image preview links
+  out = out.split("?")[0].split("#")[0];
+  // If extension is missing on Amazon media URLs, append jpg fallback
+  if (/media-amazon\.com|images-amazon\.com/i.test(out) && !/\.(jpg|jpeg|png|webp)$/i.test(out)) {
+    out = `${out}.jpg`;
+  }
+  return out;
 }
 
 function extractAmazonImageUrlsFromHtml(html: string): string[] {
@@ -88,11 +100,15 @@ function extractAmazonImageUrlsFromHtml(html: string): string[] {
   // Direct image URLs in HTML attributes.
   const attrPattern = /https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)(?:[^\s"'<>]*)/gi;
   for (const match of html.matchAll(attrPattern)) {
-    const candidate = (match[0] ?? "").trim();
+    const candidate = canonicalizeAmazonImageUrl((match[0] ?? "").trim());
     if (!candidate) continue;
     if (!/images[-.]amazon\.com|media-amazon\.com/i.test(candidate)) continue;
     if (/sprite|icon|logo|spacer/i.test(candidate)) continue;
-    found.add(candidate.replace(/\._[^.]+\./, "."));
+    found.add(candidate);
+
+    // Add an alternate normalized variant only as backup.
+    const stripped = candidate.replace(/\._[^.]+\./, ".");
+    if (stripped !== candidate) found.add(stripped);
   }
 
   // JSON-embedded image objects (hiRes/large/mainUrl keys are common on Amazon PDP).
@@ -101,11 +117,14 @@ function extractAmazonImageUrlsFromHtml(html: string): string[] {
     "gi",
   );
   for (const match of html.matchAll(jsonKeyPattern)) {
-    const candidate = (match[1] ?? "").replace(/\\\//g, "/").trim();
+    const candidate = canonicalizeAmazonImageUrl(match[1] ?? "");
     if (!candidate) continue;
     if (!/images[-.]amazon\.com|media-amazon\.com/i.test(candidate)) continue;
     if (/sprite|icon|logo|spacer/i.test(candidate)) continue;
-    found.add(candidate.replace(/\._[^.]+\./, "."));
+    found.add(candidate);
+
+    const stripped = candidate.replace(/\._[^.]+\./, ".");
+    if (stripped !== candidate) found.add(stripped);
   }
 
   return Array.from(found).slice(0, 30);
