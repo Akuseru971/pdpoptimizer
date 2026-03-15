@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import OpenAI, { APIError } from "openai";
 import type { PdpParserProvider, PdpParseResult, ParsedPdpData } from "@/services/pdp-parser/types";
 
 // ─── HTML helpers ─────────────────────────────────────────────────────────────
@@ -159,28 +159,27 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
       } catch (error) {
         lastError = error;
 
-        const msg = error instanceof Error ? error.message : "";
-        const isRateLimit = msg.includes("429") || msg.toLowerCase().includes("rate limit");
-        // Billing/account-level quota — no point retrying
-        const isBillingQuota =
-          msg.toLowerCase().includes("quota") || msg.toLowerCase().includes("billing");
-
-        if (isBillingQuota) {
-          return {
-            ok: false,
-            asin,
-            source: "OpenAI",
-            data: {},
-            error: msg || "OpenAI quota exceeded",
-            quotaExceeded: true,
-          };
-        }
-
-        if (isRateLimit && attempt < MAX_RETRIES - 1) {
-          // Exponential backoff: 1s, 2s, 4s
-          await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
-          continue;
-        }
+          // Use the SDK's structured error codes — much more reliable than parsing message text.
+          // insufficient_quota  → billing/account limit, no point retrying
+          // rate_limit_exceeded → temporary TPM/RPM limit, retry with backoff
+          if (error instanceof APIError) {
+            const code = error.code ?? "";
+            if (code === "insufficient_quota") {
+              return {
+                ok: false,
+                asin,
+                source: "OpenAI",
+                data: {},
+                error: error.message,
+                quotaExceeded: true,
+              };
+            }
+            if (code === "rate_limit_exceeded" && attempt < MAX_RETRIES - 1) {
+              // Exponential backoff: 1s, 2s, 4s
+              await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
+              continue;
+            }
+          }
 
         // Non-retryable error or retries exhausted
         break;
