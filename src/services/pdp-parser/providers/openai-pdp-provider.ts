@@ -130,6 +130,92 @@ function extractAmazonImageUrlsFromHtml(html: string): string[] {
   return Array.from(found).slice(0, 30);
 }
 
+function decodeHtmlEntities(value: string): string {
+  return value
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&nbsp;/g, " ");
+}
+
+function stripTags(value: string): string {
+  return decodeHtmlEntities(value.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim());
+}
+
+function extractByIdText(html: string, id: string): string | undefined {
+  const regex = new RegExp(`id=["']${id}["'][^>]*>([\\s\\S]{0,3000}?)<\\/`, "i");
+  const match = html.match(regex);
+  if (!match?.[1]) return undefined;
+  const text = stripTags(match[1]);
+  return text || undefined;
+}
+
+function extractPriceFromHtml(html: string): number | undefined {
+  const idCandidates = ["priceblock_ourprice", "priceblock_dealprice", "price_inside_buybox", "corePrice_desktop"];
+  for (const id of idCandidates) {
+    const text = extractByIdText(html, id);
+    if (!text) continue;
+    const price = Number((text.match(/\d+[\.,]\d{2}/)?.[0] ?? "").replace(",", "."));
+    if (Number.isFinite(price)) return price;
+  }
+  const fallback = html.match(/"priceAmount"\s*:\s*"?(\d+[\.,]\d{2})"?/i)?.[1];
+  if (!fallback) return undefined;
+  const price = Number(fallback.replace(",", "."));
+  return Number.isFinite(price) ? price : undefined;
+}
+
+function extractRatingFromHtml(html: string): number | undefined {
+  const m = html.match(/(\d(?:[\.,]\d)?)\s*out of\s*5\s*stars/i) ?? html.match(/"rating"\s*:\s*"?(\d(?:[\.,]\d)?)"?/i);
+  if (!m?.[1]) return undefined;
+  const rating = Number(m[1].replace(",", "."));
+  return Number.isFinite(rating) ? rating : undefined;
+}
+
+function extractBulletPointsFromHtml(html: string): string[] | undefined {
+  const block = html.match(/id=["'](?:feature-bullets|featurebullets_feature_div)["'][\s\S]{0,8000}?<\/ul>/i)?.[0];
+  if (!block) return undefined;
+  const bullets = Array.from(block.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi))
+    .map((m) => stripTags(m[1] ?? ""))
+    .map((t) => t.replace(/^[\-•–\*\s]+/, "").trim())
+    .filter((t) => t && !/customer reviews|ask a question/i.test(t));
+  return bullets.length ? Array.from(new Set(bullets)).slice(0, 10) : undefined;
+}
+
+function extractBrandFromHtml(html: string): string | undefined {
+  const byline = extractByIdText(html, "bylineInfo");
+  if (!byline) return undefined;
+  return byline.replace(/^Visit the\s+/i, "").replace(/\s+Store$/i, "").trim() || undefined;
+}
+
+function extractCategoryFromHtml(html: string): string | undefined {
+  const crumbs = Array.from(html.matchAll(/class=["'][^"']*a-link-normal[^"']*a-color-tertiary[^"']*["'][^>]*>([\s\S]*?)<\/a>/gi))
+    .map((m) => stripTags(m[1] ?? ""))
+    .filter(Boolean);
+  return crumbs[0] || undefined;
+}
+
+function extractDescriptionFromHtml(html: string): string | undefined {
+  const fromDescription = extractByIdText(html, "productDescription");
+  if (fromDescription) return fromDescription;
+  const fromAplus = extractByIdText(html, "aplus_feature_div") ?? extractByIdText(html, "aplus");
+  return fromAplus || undefined;
+}
+
+function extractPdpFallbackFromHtml(html: string): ParsedPdpData {
+  return {
+    productName: extractByIdText(html, "productTitle"),
+    brand: extractBrandFromHtml(html),
+    category: extractCategoryFromHtml(html),
+    price: extractPriceFromHtml(html),
+    rating: extractRatingFromHtml(html),
+    bulletPoints: extractBulletPointsFromHtml(html),
+    description: extractDescriptionFromHtml(html),
+    imageUrls: extractAmazonImageUrlsFromHtml(html),
+  };
+}
+
 // ─── Provider ─────────────────────────────────────────────────────────────────
 
 export class OpenAIPdpParserProvider implements PdpParserProvider {
@@ -205,6 +291,7 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
 
     const MAX_RETRIES = 3;
     let lastError: unknown;
+    const htmlFallback = htmlRaw ? extractPdpFallbackFromHtml(htmlRaw) : {};
 
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       try {
@@ -225,7 +312,7 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
         const imageUrls = Array.from(new Set([...mappedImages, ...extractedFromHtml])).slice(0, 30);
 
         // Keep the original field mapping behavior that was previously stable.
-        const data: ParsedPdpData = {
+        const dataFromLlm: ParsedPdpData = {
           productName: typeof raw.productName === "string" ? raw.productName : undefined,
           brand: typeof raw.brand === "string" ? raw.brand : undefined,
           sellerName: typeof raw.sellerName === "string" ? raw.sellerName : undefined,
@@ -235,6 +322,18 @@ export class OpenAIPdpParserProvider implements PdpParserProvider {
           bulletPoints: Array.isArray(raw.bulletPoints) ? (raw.bulletPoints as string[]) : undefined,
           description: typeof raw.description === "string" ? raw.description : undefined,
           imageUrls: imageUrls.length ? imageUrls : undefined,
+        };
+
+        const data: ParsedPdpData = {
+          productName: dataFromLlm.productName ?? htmlFallback.productName,
+          brand: dataFromLlm.brand ?? htmlFallback.brand,
+          sellerName: dataFromLlm.sellerName ?? dataFromLlm.brand ?? htmlFallback.brand,
+          category: dataFromLlm.category ?? htmlFallback.category,
+          price: dataFromLlm.price ?? htmlFallback.price,
+          rating: dataFromLlm.rating ?? htmlFallback.rating,
+          bulletPoints: dataFromLlm.bulletPoints ?? htmlFallback.bulletPoints,
+          description: dataFromLlm.description ?? htmlFallback.description,
+          imageUrls: dataFromLlm.imageUrls ?? htmlFallback.imageUrls,
         };
 
         return { ok: true, asin, source, data };
